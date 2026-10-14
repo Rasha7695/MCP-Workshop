@@ -10,8 +10,7 @@ class MCPClientManager:
     Client for Model Context Protocol (MCP) servers.
     Supports:
     - Open-source Google Calendar MCP (@cocal/google-calendar-mcp) over stdio
-    - Remote MCP servers (Gmail MCP) over Streamable HTTP / JSON-RPC 2.0
-    - Official Google Calendar MCP is commented out as requested.
+    - Open-source Gmail MCP (@gongrzhe/server-gmail-autoauth-mcp) over stdio
     """
 
     def __init__(self):
