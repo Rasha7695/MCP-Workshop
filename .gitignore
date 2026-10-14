@@ -1,0 +1,21 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Google OAuth generated key files
+gcp-oauth.keys.json
+
+# Python virtual environment
+venv/
+.venv/
+env/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Operating System files
+.DS_Store
+Thumbs.db
