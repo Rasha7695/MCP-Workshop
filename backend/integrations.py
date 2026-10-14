@@ -1,9 +1,7 @@
 import os
 import json
-import base64
 import time
 from datetime import datetime, timedelta
-from email.mime.text import MIMEText
 from typing import Dict, Any, List, Optional
 import httpx
 from dotenv import load_dotenv
@@ -11,14 +9,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 STATE_FILE_PATH = os.path.join(os.path.dirname(__file__), "data", "integrations_state.json")
-
-def _format_google_error(resp: httpx.Response, action: str) -> Dict[str, Any]:
-    try:
-        err_json = resp.json().get("error", {})
-        msg = err_json.get("message", resp.text)
-        return {"error": f"{action} error ({resp.status_code}): {msg}"}
-    except Exception:
-        return {"error": f"{action} error ({resp.status_code}): {resp.text}"}
 
 def _get_default_seed_data() -> Dict[str, Any]:
     now = datetime.now()
@@ -571,7 +561,7 @@ class IntegrationManager:
         return token
 
     # -------------------------------------------------------------
-    # Gmail Tools Implementation
+    # Gmail Tools Implementation (Sandbox / Local)
     # -------------------------------------------------------------
     def is_gmail_connected(self) -> bool:
         return self.state.get("gmail", {}).get("connected", False)
@@ -582,66 +572,25 @@ class IntegrationManager:
                 "error": "Gmail is NOT connected. Please connect your Gmail account in the app header or modal to access your emails."
             }
 
-        mode = self.state["gmail"].get("mode", "sandbox")
-        if mode == "sandbox":
-            unread = [
-                e for e in self.state.get("sandbox_emails", [])
-                if e.get("folder") == "inbox" and e.get("unread")
-            ][:max_results]
-            return {
-                "account": self.state["gmail"]["email"],
-                "mode": "Sandbox Mode",
-                "count": len(unread),
-                "emails": [
-                    {
-                        "id": e["id"],
-                        "from": e["sender"],
-                        "subject": e["subject"],
-                        "snippet": e["snippet"],
-                        "date": e["date"],
-                        "body": e["body"]
-                    } for e in unread
-                ]
-            }
-        else:
-            # Real Google OAuth
-            try:
-                token = self._get_valid_access_token()
-                if not token:
-                    return {"error": "Google account not authenticated or token missing. Please sign in with Google in the app header."}
-                with httpx.Client() as client:
-                    list_resp = client.get(
-                        f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q=is:unread&maxResults={max_results}",
-                        headers={"Authorization": f"Bearer {token}"}
-                    )
-                    if list_resp.status_code != 200:
-                        return _format_google_error(list_resp, "Gmail API")
-                    
-                    msg_list = list_resp.json().get("messages", [])
-                    emails = []
-                    for item in msg_list:
-                        m_resp = client.get(
-                            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{item['id']}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date",
-                            headers={"Authorization": f"Bearer {token}"}
-                        )
-                        if m_resp.status_code == 200:
-                            m_data = m_resp.json()
-                            headers = {h["name"]: h["value"] for h in m_data.get("payload", {}).get("headers", [])}
-                            emails.append({
-                                "id": item["id"],
-                                "from": headers.get("From", "Unknown"),
-                                "subject": headers.get("Subject", "(No Subject)"),
-                                "snippet": m_data.get("snippet", ""),
-                                "date": headers.get("Date", "")
-                            })
-                    return {
-                        "account": self.state["gmail"]["email"],
-                        "mode": "Live Google Account",
-                        "count": len(emails),
-                        "emails": emails
-                    }
-            except Exception as e:
-                return {"error": f"Error querying Gmail API: {str(e)}"}
+        unread = [
+            e for e in self.state.get("sandbox_emails", [])
+            if e.get("folder") == "inbox" and e.get("unread")
+        ][:max_results]
+        return {
+            "account": self.state.get("gmail", {}).get("email", "alex.morgan@gmail.com"),
+            "mode": "Sandbox Mode",
+            "count": len(unread),
+            "emails": [
+                {
+                    "id": e["id"],
+                    "from": e["sender"],
+                    "subject": e["subject"],
+                    "snippet": e["snippet"],
+                    "date": e["date"],
+                    "body": e["body"]
+                } for e in unread
+            ]
+        }
 
     def search_emails(self, query: str, max_results: int = 5) -> Dict[str, Any]:
         if not self.is_gmail_connected():
@@ -649,71 +598,30 @@ class IntegrationManager:
                 "error": "Gmail is NOT connected. Please connect your Gmail account in the app header or modal to access your emails."
             }
 
-        mode = self.state["gmail"].get("mode", "sandbox")
-        if mode == "sandbox":
-            q_lower = query.lower()
-            results = []
-            for e in self.state.get("sandbox_emails", []):
-                text_to_search = f"{e.get('subject', '')} {e.get('sender', '')} {e.get('body', '')} {e.get('snippet', '')}".lower()
-                if q_lower in text_to_search:
-                    results.append({
-                        "id": e["id"],
-                        "folder": e.get("folder", "inbox"),
-                        "from": e["sender"],
-                        "to": e.get("to", ""),
-                        "subject": e["subject"],
-                        "snippet": e["snippet"],
-                        "date": e["date"],
-                        "body": e["body"]
-                    })
-                if len(results) >= max_results:
-                    break
-            return {
-                "query": query,
-                "account": self.state["gmail"]["email"],
-                "mode": "Sandbox Mode",
-                "count": len(results),
-                "emails": results
-            }
-        else:
-            try:
-                token = self._get_valid_access_token()
-                if not token:
-                    return {"error": "Google account not authenticated or token missing. Please sign in with Google in the app header."}
-                with httpx.Client() as client:
-                    list_resp = client.get(
-                        f"https://gmail.googleapis.com/gmail/v1/users/me/messages?q={query}&maxResults={max_results}",
-                        headers={"Authorization": f"Bearer {token}"}
-                    )
-                    if list_resp.status_code != 200:
-                        return _format_google_error(list_resp, "Gmail API")
-                    
-                    msg_list = list_resp.json().get("messages", [])
-                    emails = []
-                    for item in msg_list:
-                        m_resp = client.get(
-                            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{item['id']}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date",
-                            headers={"Authorization": f"Bearer {token}"}
-                        )
-                        if m_resp.status_code == 200:
-                            m_data = m_resp.json()
-                            headers = {h["name"]: h["value"] for h in m_data.get("payload", {}).get("headers", [])}
-                            emails.append({
-                                "id": item["id"],
-                                "from": headers.get("From", "Unknown"),
-                                "subject": headers.get("Subject", "(No Subject)"),
-                                "snippet": m_data.get("snippet", ""),
-                                "date": headers.get("Date", "")
-                            })
-                    return {
-                        "query": query,
-                        "account": self.state["gmail"]["email"],
-                        "mode": "Live Google Account",
-                        "count": len(emails),
-                        "emails": emails
-                    }
-            except Exception as e:
-                return {"error": f"Error querying Gmail API: {str(e)}"}
+        q_lower = query.lower()
+        results = []
+        for e in self.state.get("sandbox_emails", []):
+            text_to_search = f"{e.get('subject', '')} {e.get('sender', '')} {e.get('body', '')} {e.get('snippet', '')}".lower()
+            if q_lower in text_to_search:
+                results.append({
+                    "id": e["id"],
+                    "folder": e.get("folder", "inbox"),
+                    "from": e["sender"],
+                    "to": e.get("to", ""),
+                    "subject": e["subject"],
+                    "snippet": e["snippet"],
+                    "date": e["date"],
+                    "body": e["body"]
+                })
+            if len(results) >= max_results:
+                break
+        return {
+            "query": query,
+            "account": self.state.get("gmail", {}).get("email", "alex.morgan@gmail.com"),
+            "mode": "Sandbox Mode",
+            "count": len(results),
+            "emails": results
+        }
 
     def send_email(self, to: str, subject: str, body: str) -> Dict[str, Any]:
         if not self.is_gmail_connected():
@@ -721,64 +629,32 @@ class IntegrationManager:
                 "error": "Gmail is NOT connected. Please connect your Gmail account in the app header or modal before sending emails."
             }
 
-        sender_email = self.state["gmail"]["email"]
-        mode = self.state["gmail"].get("mode", "sandbox")
-
-        if mode == "sandbox":
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            new_id = f"sent_{int(time.time())}"
-            new_email = {
-                "id": new_id,
-                "folder": "sent",
-                "unread": False,
-                "sender": sender_email,
-                "to": to,
-                "subject": subject,
-                "snippet": body[:80] + ("..." if len(body) > 80 else ""),
-                "body": body,
-                "date": now_str
-            }
-            self.state.setdefault("sandbox_emails", []).insert(0, new_email)
-            self._save_state()
-            return {
-                "status": "success",
-                "message": f"Email successfully sent to {to}",
-                "mode": "Sandbox Mode",
-                "id": new_id,
-                "sender": sender_email,
-                "to": to,
-                "subject": subject,
-                "timestamp": now_str
-            }
-        else:
-            try:
-                token = self._get_valid_access_token()
-                if not token:
-                    return {"error": "Google account not authenticated or token missing. Please sign in with Google in the app header."}
-                mime_msg = MIMEText(body)
-                mime_msg["to"] = to
-                mime_msg["from"] = sender_email
-                mime_msg["subject"] = subject
-                raw = base64.urlsafe_b64encode(mime_msg.as_bytes()).decode()
-
-                with httpx.Client() as client:
-                    resp = client.post(
-                        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                        json={"raw": raw}
-                    )
-                    if resp.status_code not in [200, 201]:
-                        return _format_google_error(resp, "Gmail Send API")
-                    return {
-                        "status": "success",
-                        "message": f"Email successfully sent to {to}",
-                        "mode": "Live Google Account",
-                        "id": resp.json().get("id"),
-                        "to": to,
-                        "subject": subject
-                    }
-            except Exception as e:
-                return {"error": f"Error sending email via Gmail API: {str(e)}"}
+        sender_email = self.state.get("gmail", {}).get("email", "alex.morgan@gmail.com")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        new_id = f"sent_{int(time.time())}"
+        new_email = {
+            "id": new_id,
+            "folder": "sent",
+            "unread": False,
+            "sender": sender_email,
+            "to": to,
+            "subject": subject,
+            "snippet": body[:80] + ("..." if len(body) > 80 else ""),
+            "body": body,
+            "date": now_str
+        }
+        self.state.setdefault("sandbox_emails", []).insert(0, new_email)
+        self._save_state()
+        return {
+            "status": "success",
+            "message": f"Email successfully sent to {to}",
+            "mode": "Sandbox Mode",
+            "id": new_id,
+            "sender": sender_email,
+            "to": to,
+            "subject": subject,
+            "timestamp": now_str
+        }
 
     def create_email_draft(self, to: str, subject: str, body: str) -> Dict[str, Any]:
         if not self.is_gmail_connected():
@@ -786,66 +662,34 @@ class IntegrationManager:
                 "error": "Gmail is NOT connected. Please connect your Gmail account in the app header or modal to create drafts."
             }
 
-        sender_email = self.state["gmail"]["email"]
-        mode = self.state["gmail"].get("mode", "sandbox")
-
-        if mode == "sandbox":
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            new_id = f"draft_{int(time.time())}"
-            new_draft = {
-                "id": new_id,
-                "folder": "drafts",
-                "unread": False,
-                "sender": sender_email,
-                "to": to,
-                "subject": subject,
-                "snippet": body[:80] + ("..." if len(body) > 80 else ""),
-                "body": body,
-                "date": now_str
-            }
-            self.state.setdefault("sandbox_emails", []).insert(0, new_draft)
-            self._save_state()
-            return {
-                "status": "success",
-                "message": f"Draft saved successfully for {to}",
-                "mode": "Sandbox Mode",
-                "draft_id": new_id,
-                "to": to,
-                "subject": subject,
-                "timestamp": now_str
-            }
-        else:
-            try:
-                token = self._get_valid_access_token()
-                if not token:
-                    return {"error": "Google account not authenticated or token missing. Please sign in with Google in the app header."}
-                mime_msg = MIMEText(body)
-                mime_msg["to"] = to
-                mime_msg["from"] = sender_email
-                mime_msg["subject"] = subject
-                raw = base64.urlsafe_b64encode(mime_msg.as_bytes()).decode()
-
-                with httpx.Client() as client:
-                    resp = client.post(
-                        "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
-                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                        json={"message": {"raw": raw}}
-                    )
-                    if resp.status_code not in [200, 201]:
-                        return _format_google_error(resp, "Gmail Drafts API")
-                    return {
-                        "status": "success",
-                        "message": f"Draft created in your Gmail account for {to}",
-                        "mode": "Live Google Account",
-                        "draft_id": resp.json().get("id"),
-                        "to": to,
-                        "subject": subject
-                    }
-            except Exception as e:
-                return {"error": f"Error creating draft via Gmail API: {str(e)}"}
+        sender_email = self.state.get("gmail", {}).get("email", "alex.morgan@gmail.com")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        new_id = f"draft_{int(time.time())}"
+        new_draft = {
+            "id": new_id,
+            "folder": "drafts",
+            "unread": False,
+            "sender": sender_email,
+            "to": to,
+            "subject": subject,
+            "snippet": body[:80] + ("..." if len(body) > 80 else ""),
+            "body": body,
+            "date": now_str
+        }
+        self.state.setdefault("sandbox_emails", []).insert(0, new_draft)
+        self._save_state()
+        return {
+            "status": "success",
+            "message": f"Draft saved successfully for {to}",
+            "mode": "Sandbox Mode",
+            "draft_id": new_id,
+            "to": to,
+            "subject": subject,
+            "timestamp": now_str
+        }
 
     # -------------------------------------------------------------
-    # Google Calendar Tools Implementation
+    # Google Calendar Tools Implementation (Sandbox / Local)
     # -------------------------------------------------------------
     def is_calendar_connected(self) -> bool:
         return self.state.get("calendar", {}).get("connected", False)
@@ -856,62 +700,24 @@ class IntegrationManager:
                 "error": "Google Calendar is NOT connected. Please connect your Google Calendar in the app header or modal to view your schedule."
             }
 
-        mode = self.state["calendar"].get("mode", "sandbox")
-        if mode == "sandbox":
-            events = self.state.get("sandbox_events", [])
-            filtered = []
-            for ev in events:
-                ev_start = ev.get("start", "")
-                if time_min and ev_start < time_min:
-                    continue
-                if time_max and ev_start > time_max:
-                    continue
-                filtered.append(ev)
-            
-            # Sort by start time
-            filtered.sort(key=lambda x: x.get("start", ""))
-            return {
-                "account": self.state["calendar"]["email"],
-                "mode": "Sandbox Mode",
-                "count": len(filtered[:max_results]),
-                "events": filtered[:max_results]
-            }
-        else:
-            try:
-                token = self._get_valid_access_token()
-                if not token:
-                    return {"error": "Google account not authenticated or token missing. Please sign in with Google in the app header."}
-                url = f"https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults={max_results}"
-                if time_min:
-                    url += f"&timeMin={time_min if 'T' in time_min else time_min + 'T00:00:00Z'}"
-                if time_max:
-                    url += f"&timeMax={time_max if 'T' in time_max else time_max + 'T23:59:59Z'}"
-
-                with httpx.Client() as client:
-                    resp = client.get(url, headers={"Authorization": f"Bearer {token}"})
-                    if resp.status_code != 200:
-                        return _format_google_error(resp, "Google Calendar API")
-                    
-                    items = resp.json().get("items", [])
-                    events = []
-                    for it in items:
-                        events.append({
-                            "id": it.get("id"),
-                            "summary": it.get("summary", "(No Title)"),
-                            "description": it.get("description", ""),
-                            "location": it.get("location", ""),
-                            "start": it.get("start", {}).get("dateTime", it.get("start", {}).get("date")),
-                            "end": it.get("end", {}).get("dateTime", it.get("end", {}).get("date")),
-                            "attendees": [a.get("email") for a in it.get("attendees", []) if a.get("email")]
-                        })
-                    return {
-                        "account": self.state["calendar"]["email"],
-                        "mode": "Live Google Account",
-                        "count": len(events),
-                        "events": events
-                    }
-            except Exception as e:
-                return {"error": f"Error querying Google Calendar API: {str(e)}"}
+        events = self.state.get("sandbox_events", [])
+        filtered = []
+        for ev in events:
+            ev_start = ev.get("start", "")
+            if time_min and ev_start < time_min:
+                continue
+            if time_max and ev_start > time_max:
+                continue
+            filtered.append(ev)
+        
+        # Sort by start time
+        filtered.sort(key=lambda x: x.get("start", ""))
+        return {
+            "account": self.state.get("calendar", {}).get("email", "alex.morgan@gmail.com"),
+            "mode": "Sandbox Mode",
+            "count": len(filtered[:max_results]),
+            "events": filtered[:max_results]
+        }
 
     def check_calendar_availability(self, start_time: str, end_time: str) -> Dict[str, Any]:
         if not self.is_calendar_connected():
@@ -923,43 +729,28 @@ class IntegrationManager:
         clean_start = start_time.replace("Z", "").replace("+00:00", "")
         clean_end = end_time.replace("Z", "").replace("+00:00", "")
 
-        mode = self.state["calendar"].get("mode", "sandbox")
-        if mode == "sandbox":
-            events = self.state.get("sandbox_events", [])
-            conflicts = []
-            for ev in events:
-                ev_s = ev.get("start", "").replace("Z", "").replace("+00:00", "")
-                ev_e = ev.get("end", "").replace("Z", "").replace("+00:00", "")
-                
-                # Overlap condition: start < ev_end and end > ev_start
-                if clean_start < ev_e and clean_end > ev_s:
-                    conflicts.append({
-                        "summary": ev.get("summary"),
-                        "start": ev.get("start"),
-                        "end": ev.get("end")
-                    })
+        events = self.state.get("sandbox_events", [])
+        conflicts = []
+        for ev in events:
+            ev_s = ev.get("start", "").replace("Z", "").replace("+00:00", "")
+            ev_e = ev.get("end", "").replace("Z", "").replace("+00:00", "")
             
-            is_available = len(conflicts) == 0
-            return {
-                "available": is_available,
-                "requested_slot": {"start": start_time, "end": end_time},
-                "status": "Available" if is_available else "Busy (Conflict found)",
-                "conflicts": conflicts,
-                "mode": "Sandbox Mode"
-            }
-        else:
-            # Query Google Calendar for overlap
-            events_result = self.list_calendar_events(time_min=start_time, time_max=end_time, max_results=10)
-            if "error" in events_result:
-                return events_result
-            conflicts = events_result.get("events", [])
-            return {
-                "available": len(conflicts) == 0,
-                "requested_slot": {"start": start_time, "end": end_time},
-                "status": "Available" if len(conflicts) == 0 else "Busy",
-                "conflicts": conflicts,
-                "mode": "Live Google Account"
-            }
+            # Overlap condition: start < ev_end and end > ev_start
+            if clean_start < ev_e and clean_end > ev_s:
+                conflicts.append({
+                    "summary": ev.get("summary"),
+                    "start": ev.get("start"),
+                    "end": ev.get("end")
+                })
+        
+        is_available = len(conflicts) == 0
+        return {
+            "available": is_available,
+            "requested_slot": {"start": start_time, "end": end_time},
+            "status": "Available" if is_available else "Busy (Conflict found)",
+            "conflicts": conflicts,
+            "mode": "Sandbox Mode"
+        }
 
     def create_calendar_event(
         self,
@@ -975,65 +766,24 @@ class IntegrationManager:
                 "error": "Google Calendar is NOT connected. Please connect your Google Calendar in the app header or modal before scheduling events."
             }
 
-        mode = self.state["calendar"].get("mode", "sandbox")
-        if mode == "sandbox":
-            new_id = f"evt_{int(time.time())}"
-            new_event = {
-                "id": new_id,
-                "summary": summary,
-                "description": description,
-                "location": location,
-                "start": start_time,
-                "end": end_time,
-                "attendees": attendees or [self.state["calendar"]["email"]]
-            }
-            self.state.setdefault("sandbox_events", []).append(new_event)
-            self._save_state()
-            return {
-                "status": "success",
-                "message": f"Calendar event '{summary}' scheduled successfully!",
-                "event": new_event,
-                "mode": "Sandbox Mode"
-            }
-        else:
-            try:
-                token = self._get_valid_access_token()
-                if not token:
-                    return {"error": "Google account not authenticated or token missing. Please sign in with Google in the app header."}
-                body = {
-                    "summary": summary,
-                    "description": description,
-                    "location": location,
-                    "start": {"dateTime": start_time if "T" in start_time else f"{start_time}T00:00:00Z"},
-                    "end": {"dateTime": end_time if "T" in end_time else f"{end_time}T01:00:00Z"},
-                }
-                if attendees:
-                    body["attendees"] = [{"email": a} for a in attendees]
-
-                with httpx.Client() as client:
-                    resp = client.post(
-                        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-                        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                        json=body
-                    )
-                    if resp.status_code not in [200, 201]:
-                        return _format_google_error(resp, "Google Calendar Create Event API")
-                    
-                    data = resp.json()
-                    return {
-                        "status": "success",
-                        "message": f"Calendar event '{summary}' created in your Google Calendar!",
-                        "event": {
-                            "id": data.get("id"),
-                            "summary": summary,
-                            "start": start_time,
-                            "end": end_time,
-                            "htmlLink": data.get("htmlLink")
-                        },
-                        "mode": "Live Google Account"
-                    }
-            except Exception as e:
-                return {"error": f"Error creating Google Calendar event: {str(e)}"}
+        new_id = f"evt_{int(time.time())}"
+        new_event = {
+            "id": new_id,
+            "summary": summary,
+            "description": description,
+            "location": location,
+            "start": start_time,
+            "end": end_time,
+            "attendees": attendees or [self.state.get("calendar", {}).get("email", "alex.morgan@gmail.com")]
+        }
+        self.state.setdefault("sandbox_events", []).append(new_event)
+        self._save_state()
+        return {
+            "status": "success",
+            "message": f"Calendar event '{summary}' scheduled successfully!",
+            "event": new_event,
+            "mode": "Sandbox Mode"
+        }
 
 # Global singleton
 integrations_mgr = IntegrationManager()
